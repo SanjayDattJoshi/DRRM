@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Disaster Relief Resource Routing Platform</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <!-- ── Header ─────────────────────────────────────────────────────────── -->
+  <header>
+    <div class="header-inner">
+      <span class="header-icon">🚨</span>
+      <div>
+        <h1>Disaster Relief Resource Routing Platform</h1>
+        <p class="header-sub">Emergency Operations Command Center</p>
+      </div>
+      <div id="statusIndicator" class="status-badge status-connecting">Connecting…</div>
+    </div>
+  </header>
+
+  <!-- ── Navigation ─────────────────────────────────────────────────────── -->
+  <nav>
+    <button class="nav-btn active" data-section="dashboard">📊 Dashboard</button>
+    <button class="nav-btn" data-section="priorities">⚠️ Priorities</button>
+    <button class="nav-btn" data-section="allocation">📦 Allocation</button>
+    <button class="nav-btn" data-section="route">🗺️ Route Finder</button>
+    <button class="nav-btn" data-section="multistop">🔀 Multi-Stop</button>
+    <button class="nav-btn" data-section="simulate">🧪 What-If</button>
+    <button class="nav-btn" data-section="crud">✏️ Manage Data</button>
+  </nav>
+
+  <main>
+
+    <!-- ── Dashboard ──────────────────────────────────────────────────── -->
+    <section id="dashboard" class="section active">
+      <div class="section-header">
+        <h2>📊 Dashboard</h2>
+        <button class="btn btn-primary" onclick="loadDashboard()">🔄 Refresh</button>
+      </div>
+
+      <div class="cards-grid">
+        <!-- Relief Centers -->
+        <div class="card">
+          <h3 class="card-title">🏢 Relief Centers</h3>
+          <div id="centersTable" class="table-wrap">
+            <p class="placeholder">Loading…</p>
+          </div>
+        </div>
+
+        <!-- Affected Areas -->
+        <div class="card">
+          <h3 class="card-title">🏚️ Affected Areas</h3>
+          <div id="areasTable" class="table-wrap">
+            <p class="placeholder">Loading…</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Roads -->
+      <div class="card mt">
+        <h3 class="card-title">🛤️ Road Network</h3>
+        <div id="roadsTable" class="table-wrap">
+          <p class="placeholder">Loading…</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── Priority Scoring ────────────────────────────────────────────── -->
+    <section id="priorities" class="section">
+      <div class="section-header">
+        <h2>⚠️ Priority Scoring</h2>
+        <button class="btn btn-danger" onclick="computePriorities()">⚡ Compute Priorities</button>
+      </div>
+      <p class="hint">
+        Formula: <code>P = 0.5×(severity/5) + 0.3×(people/max_people) + 0.2×access_difficulty</code>
+      </p>
+      <div id="priorityResults" class="table-wrap">
+        <p class="placeholder">Click "Compute Priorities" to rank affected areas.</p>
+      </div>
+    </section>
+
+    <!-- ── Resource Allocation ─────────────────────────────────────────── -->
+    <section id="allocation" class="section">
+      <div class="section-header">
+        <h2>📦 Resource Allocation</h2>
+        <button class="btn btn-warning" onclick="computeAllocation()">📊 Allocate Resources</button>
+      </div>
+      <p class="hint">Proportional distribution based on need vs. available supply.</p>
+      <div id="allocationSummary" class="info-box hidden"></div>
+      <div id="allocationResults" class="table-wrap">
+        <p class="placeholder">Click "Allocate Resources" to compute distribution.</p>
+      </div>
+    </section>
+
+    <!-- ── Single Route ────────────────────────────────────────────────── -->
+    <section id="route" class="section">
+      <div class="section-header">
+        <h2>🗺️ Route Finder (Dijkstra)</h2>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label for="routeCenter">Relief Center</label>
+          <select id="routeCenter"><option value="">-- Select center --</option></select>
+        </div>
+        <div class="form-group">
+          <label for="routeArea">Affected Area</label>
+          <select id="routeArea"><option value="">-- Select area --</option></select>
+        </div>
+        <div class="form-group form-group-check">
+          <label>
+            <input type="checkbox" id="routeUseTime" />
+            Optimise by time (instead of distance)
+          </label>
+        </div>
+        <div class="form-group form-group-btn">
+          <button class="btn btn-primary" onclick="findRoute()">🔍 Find Route</button>
+        </div>
+      </div>
+      <div id="routeResult" class="result-box hidden"></div>
+    </section>
+
+    <!-- ── Multi-Stop Route ────────────────────────────────────────────── -->
+    <section id="multistop" class="section">
+      <div class="section-header">
+        <h2>🔀 Multi-Stop Route Planner</h2>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label for="multiCenter">Starting Center</label>
+          <select id="multiCenter"><option value="">-- Select center --</option></select>
+        </div>
+        <div class="form-group form-group-check">
+          <label>
+            <input type="checkbox" id="multiUseTime" />
+            Optimise by time
+          </label>
+        </div>
+        <div class="form-group form-group-btn">
+          <button class="btn btn-primary" onclick="planMultiStop()">🚛 Plan Route</button>
+        </div>
+      </div>
+      <div class="card mt">
+        <h3 class="card-title">Select Affected Areas to Visit</h3>
+        <div id="multiAreaChecks" class="checks-grid">
+          <p class="placeholder">Loading areas…</p>
+        </div>
+      </div>
+      <div id="multiResult" class="result-box hidden"></div>
+    </section>
+
+    <!-- ── What-If Simulation ──────────────────────────────────────────── -->
+    <section id="simulate" class="section">
+      <div class="section-header">
+        <h2>🧪 What-If Simulation</h2>
+      </div>
+      <p class="hint">Block roads temporarily to see the impact on priorities and routes.</p>
+
+      <div class="form-row">
+        <div class="form-group">
+          <label for="simCenter">Center (optional route check)</label>
+          <select id="simCenter"><option value="">-- Select center --</option></select>
+        </div>
+        <div class="form-group form-group-check">
+          <label>
+            <input type="checkbox" id="simUseTime" />
+            Use time metric
+          </label>
+        </div>
+        <div class="form-group form-group-btn">
+          <button class="btn btn-danger" onclick="runSimulation()">🔥 Run Simulation</button>
+        </div>
+      </div>
+
+      <div class="card mt">
+        <h3 class="card-title">Roads to Block in Simulation</h3>
+        <div id="simRoadChecks" class="checks-grid">
+          <p class="placeholder">Loading roads…</p>
+        </div>
+      </div>
+
+      <div class="card mt">
+        <h3 class="card-title">Areas to Check Routes For</h3>
+        <div id="simAreaChecks" class="checks-grid">
+          <p class="placeholder">Loading areas…</p>
+        </div>
+      </div>
+
+      <div id="simResult" class="result-box hidden"></div>
+    </section>
+
+    <!-- ── CRUD ──────────────────────────────────────────────────────────── -->
+    <section id="crud" class="section">
+      <div class="section-header">
+        <h2>✏️ Manage Data</h2>
+      </div>
+
+      <div class="cards-grid">
+
+        <!-- Add Center -->
+        <div class="card">
+          <h3 class="card-title">➕ Add Relief Center</h3>
+          <form id="addCenterForm" onsubmit="addCenter(event)">
+            <div class="form-group"><label>Name</label><input type="text" name="name" required /></div>
+            <div class="form-row-2">
+              <div class="form-group"><label>Latitude</label><input type="number" step="any" name="latitude" required /></div>
+              <div class="form-group"><label>Longitude</label><input type="number" step="any" name="longitude" required /></div>
+            </div>
+            <div class="form-row-2">
+              <div class="form-group"><label>Food Kits</label><input type="number" name="total_food_kits" min="0" required /></div>
+              <div class="form-group"><label>Water Units</label><input type="number" name="total_water_units" min="0" required /></div>
+            </div>
+            <div class="form-group"><label>Medical Kits</label><input type="number" name="total_medical_kits" min="0" required /></div>
+            <button type="submit" class="btn btn-success">Add Center</button>
+          </form>
+          <div id="addCenterMsg" class="msg hidden"></div>
+        </div>
+
+        <!-- Add Area -->
+        <div class="card">
+          <h3 class="card-title">➕ Add Affected Area</h3>
+          <form id="addAreaForm" onsubmit="addArea(event)">
+            <div class="form-group"><label>Name</label><input type="text" name="name" required /></div>
+            <div class="form-row-2">
+              <div class="form-group"><label>Latitude</label><input type="number" step="any" name="latitude" required /></div>
+              <div class="form-group"><label>Longitude</label><input type="number" step="any" name="longitude" required /></div>
+            </div>
+            <div class="form-row-2">
+              <div class="form-group"><label>People Count</label><input type="number" name="people_count" min="0" required /></div>
+              <div class="form-group">
+                <label>Severity (1-5)</label>
+                <select name="severity">
+                  <option value="1">1 – Minor</option>
+                  <option value="2">2 – Moderate</option>
+                  <option value="3" selected>3 – Serious</option>
+                  <option value="4">4 – Severe</option>
+                  <option value="5">5 – Critical</option>
+                </select>
+              </div>
+            </div>
+            <div class="form-group">
+              <label>Access Difficulty</label>
+              <select name="access_difficulty">
+                <option value="0">0 – Easy</option>
+                <option value="1">1 – Hard</option>
+              </select>
+            </div>
+            <div class="form-row-2">
+              <div class="form-group"><label>Required Food Kits</label><input type="number" name="required_food_kits" min="0" required /></div>
+              <div class="form-group"><label>Required Water Units</label><input type="number" name="required_water_units" min="0" required /></div>
+            </div>
+            <div class="form-group"><label>Required Medical Kits</label><input type="number" name="required_medical_kits" min="0" required /></div>
+            <button type="submit" class="btn btn-success">Add Area</button>
+          </form>
+          <div id="addAreaMsg" class="msg hidden"></div>
+        </div>
+
+        <!-- Add Road -->
+        <div class="card">
+          <h3 class="card-title">➕ Add Road</h3>
+          <form id="addRoadForm" onsubmit="addRoad(event)">
+            <p class="hint">Center IDs: 1, 2… | Area graph IDs: area_id + 1000</p>
+            <div class="form-row-2">
+              <div class="form-group"><label>From Location ID</label><input type="number" name="from_location_id" required /></div>
+              <div class="form-group"><label>To Location ID</label><input type="number" name="to_location_id" required /></div>
+            </div>
+            <div class="form-row-2">
+              <div class="form-group"><label>Distance (km)</label><input type="number" step="any" name="distance_km" min="0" required /></div>
+              <div class="form-group"><label>Travel Time (min)</label><input type="number" name="travel_time_minutes" min="0" required /></div>
+            </div>
+            <div class="form-group form-group-check">
+              <label><input type="checkbox" name="is_blocked" /> Mark as blocked</label>
+            </div>
+            <button type="submit" class="btn btn-success">Add Road</button>
+          </form>
+          <div id="addRoadMsg" class="msg hidden"></div>
+        </div>
+
+        <!-- Delete / Edit -->
+        <div class="card">
+          <h3 class="card-title">🗑️ Delete / Toggle Road</h3>
+          <div class="form-group">
+            <label>Select Road</label>
+            <select id="deleteRoadSelect"><option value="">-- Select road --</option></select>
+          </div>
+          <div class="btn-row">
+            <button class="btn btn-warning" onclick="toggleRoadBlock()">🔒 Toggle Block</button>
+            <button class="btn btn-danger" onclick="deleteRoad()">🗑️ Delete Road</button>
+          </div>
+          <div id="deleteRoadMsg" class="msg hidden"></div>
+
+          <hr class="divider" />
+
+          <h3 class="card-title">🗑️ Delete Center</h3>
+          <div class="form-group">
+            <label>Select Center</label>
+            <select id="deleteCenterSelect"><option value="">-- Select center --</option></select>
+          </div>
+          <button class="btn btn-danger" onclick="deleteCenter()">🗑️ Delete Center</button>
+          <div id="deleteCenterMsg" class="msg hidden"></div>
+
+          <hr class="divider" />
+
+          <h3 class="card-title">🗑️ Delete Area</h3>
+          <div class="form-group">
+            <label>Select Area</label>
+            <select id="deleteAreaSelect"><option value="">-- Select area --</option></select>
+          </div>
+          <button class="btn btn-danger" onclick="deleteArea()">🗑️ Delete Area</button>
+          <div id="deleteAreaMsg" class="msg hidden"></div>
+        </div>
+
+      </div>
+    </section>
+
+  </main>
+
+  <footer>
+    <p>Disaster Relief Resource Routing Platform &copy; 2024 — Emergency Operations System</p>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
