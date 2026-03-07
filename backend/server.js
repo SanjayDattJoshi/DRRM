@@ -5,6 +5,8 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 
+const rateLimit = require('express-rate-limit');
+
 const { connectDatabase, ReliefCenter, AffectedArea, Road, nextId } = require('./database');
 const { computeAllPriorities, allocateResources } = require('./priorityScorer');
 const { buildGraph, dijkstra, findMultiStopRoute } = require('./routingEngine');
@@ -12,6 +14,16 @@ const { buildGraph, dijkstra, findMultiStopRoute } = require('./routingEngine');
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+// ─── Rate Limiting ────────────────────────────────────────────────────────────
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 300,                  // requests per window per IP
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests, please try again later.' }
+});
+app.use(limiter);
 
 // ─── Root ─────────────────────────────────────────────────────────────────────
 
