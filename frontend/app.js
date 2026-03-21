@@ -1,674 +1,634 @@
-'use strict';
+// API Base URL — matches your backend server.js PORT
+const API_URL = 'http://localhost:3000';
 
-const API_BASE = 'http://localhost:3000';
+// State
+let centers = [];
+let areas   = [];
+let roads   = [];
 
-// ─── Cache ────────────────────────────────────────────────────────────────────
-let _centers = [];
-let _areas   = [];
-let _roads   = [];
+// ══════════════════════════════════════════════════
+//  NETWORK OVERVIEW MAP
+// ══════════════════════════════════════════════════
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+let networkMap       = null;
+let centerLayer      = null;
+let areaLayer        = null;
+let routeLayer       = null;
+const mapLayerState  = { centers: true, areas: true, routes: true };
 
-async function apiFetch(path, options = {}) {
-  const res = await fetch(`${API_BASE}${path}`, {
-    headers: { 'Content-Type': 'application/json' },
-    ...options
+// Coordinate lookup keyed by location_id (centers: id, areas: id+1000)
+// This mirrors the routing engine's convention exactly.
+const locCoords = {};
+
+function initMap() {
+  if (networkMap) return; // already initialised
+
+  networkMap = L.map('networkMap', {
+    center: [27.18, 78.00],
+    zoom: 11,
+    zoomControl: true,
+    attributionControl: false
   });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error || res.statusText);
-  return data;
+
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 19
+  }).addTo(networkMap);
+
+  centerLayer = L.layerGroup().addTo(networkMap);
+  areaLayer   = L.layerGroup().addTo(networkMap);
+  routeLayer  = L.layerGroup().addTo(networkMap);
 }
 
-function showMsg(elId, text, type = 'success') {
-  const el = document.getElementById(elId);
-  if (!el) return;
-  el.textContent = text;
-  el.className = `msg ${type}`;
-  el.classList.remove('hidden');
-  setTimeout(() => el.classList.add('hidden'), 4000);
+// ── Custom SVG icon factory ────────────────────────────────────────────────
+function makeMapIcon(fillColor, glowColor, pulse) {
+  const sz = pulse ? 48 : 36;
+  const pulseAnim = pulse ? `
+    <circle cx="12" cy="12" r="9" fill="none" stroke="${glowColor}" stroke-width="1.5" opacity="0.6">
+      <animate attributeName="r" values="9;20" dur="1.8s" repeatCount="indefinite"/>
+      <animate attributeName="opacity" values="0.6;0" dur="1.8s" repeatCount="indefinite"/>
+    </circle>` : '';
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${sz}" height="${sz}" viewBox="0 0 24 24">
+    ${pulseAnim}
+    <circle cx="12" cy="12" r="8" fill="${fillColor}" opacity="0.25"/>
+    <circle cx="12" cy="12" r="5" fill="${fillColor}"/>
+    <circle cx="12" cy="12" r="5" fill="none" stroke="${glowColor}" stroke-width="1.5"/>
+  </svg>`;
+  return L.divIcon({
+    html: svg,
+    className: '',
+    iconSize: [sz, sz],
+    iconAnchor: [sz / 2, sz / 2],
+    popupAnchor: [0, -(sz / 2)]
+  });
 }
 
-function priorityBadge(score) {
-  if (score >= 0.7) return `<span class="badge badge-high">High</span>`;
-  if (score >= 0.4) return `<span class="badge badge-medium">Medium</span>`;
-  return `<span class="badge badge-low">Low</span>`;
+const MAP_ICONS = {
+  center:      makeMapIcon('rgba(52,199,89,0.9)',   '#34c759', false),
+  area_high:   makeMapIcon('rgba(255,45,85,0.9)',   '#ff2d55', true),
+  area_medium: makeMapIcon('rgba(255,149,0,0.9)',   '#ff9500', false),
+  area_low:    makeMapIcon('rgba(0,122,255,0.9)',    '#007aff', false),
+};
+
+function areaIcon(score) {
+  if (score >= 0.7) return MAP_ICONS.area_high;
+  if (score >= 0.4) return MAP_ICONS.area_medium;
+  return MAP_ICONS.area_low;
 }
 
-function fillBar(pct) {
-  const color = pct >= 80 ? '#3fb950' : pct >= 50 ? '#d29922' : '#f85149';
-  return `<div class="fill-bar-wrap">
-    <div style="font-size:.75rem;margin-bottom:2px">${pct}%</div>
-    <div class="fill-bar"><div class="fill-bar-inner" style="width:${Math.min(pct,100)}%;background:${color}"></div></div>
-  </div>`;
+function priorityBadgeClass(score) {
+  if (score >= 0.7) return 'priority-high';
+  if (score >= 0.4) return 'priority-medium';
+  return 'priority-low';
 }
 
-function nodeLabel(id, centers, areas) {
-  const center = centers.find((c) => c.id === id);
-  if (center) return center.name;
-  const area = areas.find((a) => a.id + 1000 === id);
-  if (area) return area.name;
-  return `Node ${id}`;
+// ── Render functions ───────────────────────────────────────────────────────
+function renderMapCenters(data) {
+  if (!centerLayer) return;
+  centerLayer.clearLayers();
+  data.forEach(c => {
+    if (!c.latitude || !c.longitude) return;
+    locCoords[c.id] = [c.latitude, c.longitude];            // graph key = c.id
+    const popup = `
+      <div class="map-popup-title center-popup">⛺ ${c.name}</div>
+      <div class="map-popup-row"><span>ID</span><strong>#${c.id}</strong></div>
+      <div class="map-popup-row"><span>🍱 Food</span><strong>${c.total_food_kits}</strong></div>
+      <div class="map-popup-row"><span>💧 Water</span><strong>${c.total_water_units}</strong></div>
+      <div class="map-popup-row"><span>🏥 Medical</span><strong>${c.total_medical_kits}</strong></div>`;
+    L.marker([c.latitude, c.longitude], { icon: MAP_ICONS.center })
+      .bindPopup(popup, { maxWidth: 220 })
+      .addTo(centerLayer);
+  });
+  document.getElementById('mapStatCenters').textContent = data.length;
 }
 
-function renderRouteNodes(path, centers, areas) {
-  if (!path || path.length === 0) return '<em>No path</em>';
-  return path.map((nodeId, i) => {
-    const isCenter = centers.some((c) => c.id === nodeId);
-    const isArea   = areas.some((a) => a.id + 1000 === nodeId);
-    const cls = isCenter ? 'route-node center' : isArea ? 'route-node area' : 'route-node';
-    const label = nodeLabel(nodeId, centers, areas);
-    const arrow = i < path.length - 1 ? '<span class="route-arrow">→</span>' : '';
-    return `<span class="${cls}">${label}</span>${arrow}`;
+function renderMapAreas(data) {
+  if (!areaLayer) return;
+  areaLayer.clearLayers();
+  data.forEach(a => {
+    if (!a.latitude || !a.longitude) return;
+    locCoords[a.id + 1000] = [a.latitude, a.longitude];    // graph key = id+1000
+    const score = a.priority_score || 0;
+    const badge = score > 0
+      ? `<span class="priority-badge ${priorityBadgeClass(score)}">${score}</span>` : '';
+    const popup = `
+      <div class="map-popup-title area-popup">🚨 ${a.name}</div>
+      <div class="map-popup-row"><span>ID</span><strong>#${a.id}</strong></div>
+      <div class="map-popup-row"><span>👥 People</span><strong>${a.people_count.toLocaleString()}</strong></div>
+      <div class="map-popup-row"><span>⚠️ Severity</span><strong>${a.severity}/5</strong></div>
+      <div class="map-popup-row"><span>🚧 Access</span><strong>${a.access_difficulty ? 'Difficult' : 'Easy'}</strong></div>
+      ${badge ? `<div style="margin-top:8px">${badge}</div>` : ''}`;
+    L.marker([a.latitude, a.longitude], { icon: areaIcon(score) })
+      .bindPopup(popup, { maxWidth: 220 })
+      .addTo(areaLayer);
+  });
+  document.getElementById('mapStatAreas').textContent = data.length;
+}
+
+function renderMapRoads(data) {
+  if (!routeLayer) return;
+  routeLayer.clearLayers();
+  let open = 0, blocked = 0;
+
+  data.forEach(r => {
+    // Resolve coordinates: centers use r.from_location_id as-is; 
+    // areas in the roads table are stored as id+1000 (e.g. 1001, 1002...)
+    // This matches the convention in database.js sample data exactly.
+    const fromCoord = locCoords[r.from_location_id];
+    const toCoord   = locCoords[r.to_location_id];
+    if (!fromCoord || !toCoord) return;
+
+    if (r.is_blocked) {
+      blocked++;
+      L.polyline([fromCoord, toCoord], {
+        color: '#ff2d55', weight: 2.5, opacity: 0.7, dashArray: '7 7'
+      }).bindTooltip(`🚫 Road #${r.id} — BLOCKED`, { sticky: true })
+        .addTo(routeLayer);
+    } else {
+      open++;
+      L.polyline([fromCoord, toCoord], {
+        color: '#007aff', weight: 2.5, opacity: 0.65
+      }).bindTooltip(`Road #${r.id} — ${r.distance_km} km · ${r.travel_time_minutes} min`, { sticky: true })
+        .addTo(routeLayer);
+    }
+  });
+
+  document.getElementById('mapStatRoads').textContent   = open;
+  document.getElementById('mapStatBlocked').textContent = blocked;
+}
+
+// ── Public map controls ────────────────────────────────────────────────────
+function toggleMapLayer(name) {
+  mapLayerState[name] = !mapLayerState[name];
+  const layerMap = { centers: centerLayer, areas: areaLayer, routes: routeLayer };
+  if (mapLayerState[name]) {
+    networkMap.addLayer(layerMap[name]);
+  } else {
+    networkMap.removeLayer(layerMap[name]);
+  }
+}
+
+function mapFitAll() {
+  const coords = [];
+  centers.forEach(c => { if (c.latitude) coords.push([c.latitude, c.longitude]); });
+  areas.forEach(a =>   { if (a.latitude) coords.push([a.latitude, a.longitude]); });
+  if (coords.length > 0 && networkMap) {
+    networkMap.fitBounds(coords, { padding: [40, 40] });
+  }
+}
+
+async function refreshMap() {
+  initMap();
+  // Re-use the already-loaded state arrays (centers / areas / roads)
+  // so the map always reflects whatever the data lists show.
+  renderMapCenters(centers);
+  renderMapAreas(areas);
+  // Roads need coords resolved, so render areas first (they populate locCoords).
+  renderMapRoads(roads);
+}
+
+// ══════════════════════════════════════════════════
+//  INITIALISE
+// ══════════════════════════════════════════════════
+
+document.addEventListener('DOMContentLoaded', () => {
+  initializeTabs();
+  updateLastUpdated();
+  setInterval(updateLastUpdated, 1000);
+
+  // Load data → this also refreshes the map
+  loadCenters();
+  loadAreas();
+  loadRoads();
+
+  setupFormHandlers();
+});
+
+// ══════════════════════════════════════════════════
+//  TAB NAVIGATION
+// ══════════════════════════════════════════════════
+
+function initializeTabs() {
+  const tabs        = document.querySelectorAll('.tab');
+  const tabContents = document.querySelectorAll('.tab-content');
+
+  tabs.forEach(tab => {
+    tab.addEventListener('click', () => {
+      const targetTab = tab.getAttribute('data-tab');
+
+      tabs.forEach(t => t.classList.remove('active'));
+      tab.classList.add('active');
+
+      tabContents.forEach(content => {
+        content.classList.remove('active');
+        if (content.id === targetTab) content.classList.add('active');
+      });
+
+      if (targetTab === 'routing')    populateRouteSelects();
+      if (targetTab === 'simulation') populateSimulationSelects();
+
+      // When the dashboard tab is re-activated, trigger a map resize so tiles
+      // fill the container properly (Leaflet needs this after display:none).
+      if (targetTab === 'dashboard' && networkMap) {
+        setTimeout(() => networkMap.invalidateSize(), 50);
+      }
+    });
+  });
+}
+
+// ══════════════════════════════════════════════════
+//  UTILITIES
+// ══════════════════════════════════════════════════
+
+function updateLastUpdated() {
+  document.getElementById('lastUpdated').textContent = new Date().toLocaleTimeString();
+}
+
+async function apiRequest(endpoint, method = 'GET', data = null) {
+  try {
+    const options = { method, headers: { 'Content-Type': 'application/json' } };
+    if (data && method !== 'GET') options.body = JSON.stringify(data);
+    const response = await fetch(`${API_URL}${endpoint}`, options);
+    return await response.json();
+  } catch (error) {
+    console.error('API Error:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+function getPriorityLevel(score) {
+  if (score >= 0.7) return 'high';
+  if (score >= 0.4) return 'medium';
+  return 'low';
+}
+
+// ══════════════════════════════════════════════════
+//  DATA LOADERS  (each one also refreshes the map)
+// ══════════════════════════════════════════════════
+
+async function loadCenters() {
+  const result = await apiRequest('/centers');
+  if (result.success) {
+    centers = result.data;
+    displayCenters(centers);
+    initMap();
+    renderMapCenters(centers);
+    // Re-render roads in case coords were missing before
+    if (roads.length) renderMapRoads(roads);
+  }
+}
+
+async function loadAreas() {
+  const result = await apiRequest('/areas');
+  if (result.success) {
+    areas = result.data;
+    displayAreas(areas);
+    initMap();
+    renderMapAreas(areas);
+    if (roads.length) renderMapRoads(roads);
+  }
+}
+
+async function loadRoads() {
+  const result = await apiRequest('/roads');
+  if (result.success) {
+    roads = result.data;
+    displayRoads(roads);
+    initMap();
+    renderMapRoads(roads);
+  }
+}
+
+// ══════════════════════════════════════════════════
+//  DISPLAY HELPERS
+// ══════════════════════════════════════════════════
+
+function displayCenters(data) {
+  const container = document.getElementById('centersList');
+  if (!data.length) {
+    container.innerHTML = '<p style="color:var(--text-muted)">No relief centers found</p>';
+    return;
+  }
+  container.innerHTML = data.map(c => `
+    <div class="data-item">
+      <strong>${c.name}</strong> (ID: ${c.id})<br>
+      📍 ${c.latitude}, ${c.longitude}<br>
+      🍱 Food: ${c.total_food_kits} | 💧 Water: ${c.total_water_units} | 🏥 Medical: ${c.total_medical_kits}
+    </div>`).join('');
+}
+
+function displayAreas(data) {
+  const container = document.getElementById('areasList');
+  if (!data.length) {
+    container.innerHTML = '<p style="color:var(--text-muted)">No affected areas found</p>';
+    return;
+  }
+  container.innerHTML = data.map(a => `
+    <div class="data-item">
+      <strong>${a.name}</strong> (ID: ${a.id})<br>
+      📍 ${a.latitude}, ${a.longitude}<br>
+      👥 People: ${a.people_count} | ⚠️ Severity: ${a.severity}/5 | 🚧 Access: ${a.access_difficulty === 1 ? 'Difficult' : 'Easy'}<br>
+      ${a.priority_score > 0
+        ? `<span class="priority-badge priority-${getPriorityLevel(a.priority_score)}">Priority: ${a.priority_score}</span>`
+        : ''}
+    </div>`).join('');
+}
+
+function displayRoads(data) {
+  const container = document.getElementById('roadsList');
+  if (!data.length) {
+    container.innerHTML = '<p style="color:var(--text-muted)">No roads found</p>';
+    return;
+  }
+  container.innerHTML = data.map(r => `
+    <div class="data-item" style="border-left-color:${r.is_blocked ? 'var(--emergency-red)' : 'var(--safe-green)'}">
+      <strong>Road ${r.id}</strong>: ${r.from_location_id} ↔ ${r.to_location_id}<br>
+      📏 ${r.distance_km} km | ⏱️ ${r.travel_time_minutes} min |
+      ${r.is_blocked
+        ? '🚫 <strong style="color:var(--emergency-red)">BLOCKED</strong>'
+        : '✅ Open'}
+    </div>`).join('');
+}
+
+// ══════════════════════════════════════════════════
+//  PRIORITY & ALLOCATION
+// ══════════════════════════════════════════════════
+
+async function computePriorities() {
+  const resultContainer = document.getElementById('prioritiesResult');
+  resultContainer.innerHTML = '<div class="loading"></div> Computing priorities...';
+
+  const result = await apiRequest('/compute-priorities', 'POST');
+
+  if (result.success) {
+    const sorted = result.data.sort((a, b) => b.priority_score - a.priority_score);
+
+    resultContainer.innerHTML = `
+      <h3 style="margin-bottom:15px;color:var(--safe-green)">✓ Priority Computation Complete</h3>
+      <table class="table">
+        <thead><tr>
+          <th>Rank</th><th>Area Name</th><th>Priority Score</th>
+          <th>People</th><th>Severity</th><th>Access</th>
+        </tr></thead>
+        <tbody>
+          ${sorted.map((area, i) => `
+            <tr>
+              <td><strong>${i + 1}</strong></td>
+              <td>${area.name}</td>
+              <td><span class="priority-badge priority-${getPriorityLevel(area.priority_score)}">${area.priority_score}</span></td>
+              <td>${area.people_count}</td>
+              <td>${area.severity}/5</td>
+              <td>${area.access_difficulty === 1 ? 'Hard' : 'Easy'}</td>
+            </tr>`).join('')}
+        </tbody>
+      </table>`;
+
+    // Reload areas so map markers update with new priority colours
+    await loadAreas();
+  } else {
+    resultContainer.innerHTML = `<p style="color:var(--emergency-red)">Error: ${result.error || result.message}</p>`;
+  }
+}
+
+async function allocateResources() {
+  const resultContainer = document.getElementById('allocationResult');
+  resultContainer.innerHTML = '<div class="loading"></div> Computing allocations...';
+
+  const result = await apiRequest('/allocate-resources', 'POST');
+
+  if (result.success) {
+    const d = result.data;
+    resultContainer.innerHTML = `
+      <h3 style="margin-bottom:15px;color:var(--safe-green)">✓ Resource Allocation Complete</h3>
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:15px;margin-bottom:20px">
+        ${['food', 'water', 'medical'].map((type, i) => {
+          const labels = ['FOOD KITS', 'WATER UNITS', 'MEDICAL KITS'];
+          const avail  = [d.totalAvailable.food, d.totalAvailable.water, d.totalAvailable.medical];
+          const req    = [d.totalRequired.food,  d.totalRequired.water,  d.totalRequired.medical];
+          const ratio  = [d.ratios.food,          d.ratios.water,         d.ratios.medical];
+          const col    = ratio[i] >= 1 ? 'var(--safe-green)' : 'var(--alert-orange)';
+          return `
+            <div style="padding:15px;background:var(--bg-tertiary);border-radius:8px">
+              <div style="font-size:.85rem;color:var(--text-muted);margin-bottom:5px">${labels[i]}</div>
+              <div style="font-size:1.3rem;font-weight:700">${avail[i]} / ${req[i]}</div>
+              <div style="font-size:.9rem;color:${col}">${(ratio[i]*100).toFixed(1)}% fulfillment</div>
+            </div>`;
+        }).join('')}
+      </div>
+      <table class="table">
+        <thead><tr>
+          <th>Area</th><th>Priority</th>
+          <th>Food (Alloc/Req)</th><th>Water (Alloc/Req)</th><th>Medical (Alloc/Req)</th>
+        </tr></thead>
+        <tbody>
+          ${d.allocations.map(a => `
+            <tr>
+              <td><strong>${a.area_name}</strong></td>
+              <td><span class="priority-badge priority-${getPriorityLevel(a.priority_score)}">${a.priority_score}</span></td>
+              <td>${a.allocated.food_kits} / ${a.required.food_kits}</td>
+              <td>${a.allocated.water_units} / ${a.required.water_units}</td>
+              <td>${a.allocated.medical_kits} / ${a.required.medical_kits}</td>
+            </tr>`).join('')}
+        </tbody>
+      </table>`;
+  } else {
+    resultContainer.innerHTML = `<p style="color:var(--emergency-red)">Error: ${result.error || result.message}</p>`;
+  }
+}
+
+// ══════════════════════════════════════════════════
+//  ROUTING
+// ══════════════════════════════════════════════════
+
+function populateRouteSelects() {
+  const cs = centers.map(c => `<option value="${c.id}">${c.name} (ID: ${c.id})</option>`).join('');
+  const as = areas.map(a   => `<option value="${a.id}">${a.name} (ID: ${a.id})</option>`).join('');
+
+  document.getElementById('routeCenterId').innerHTML     = cs;
+  document.getElementById('routeAreaId').innerHTML       = as;
+  document.getElementById('multiRouteCenterId').innerHTML = cs;
+  document.getElementById('multiAreaSelect').innerHTML   = areas.map(a => `
+    <label class="checkbox-label">
+      <input type="checkbox" name="areaId" value="${a.id}">
+      ${a.name} (ID: ${a.id})
+    </label>`).join('');
+}
+
+async function findRoute(event) {
+  event.preventDefault();
+  const centerId = document.getElementById('routeCenterId').value;
+  const areaId   = document.getElementById('routeAreaId').value;
+  const useTime  = document.getElementById('routeUseTime').checked;
+  const rc       = document.getElementById('routeResult');
+  rc.innerHTML   = '<div class="loading"></div> Computing route...';
+
+  const result = await apiRequest(`/routes?centerId=${centerId}&areaId=${areaId}&useTime=${useTime}`);
+
+  if (result.success) {
+    rc.innerHTML = `
+      <h3 style="margin-bottom:15px;color:var(--safe-green)">✓ Route Found</h3>
+      <div class="route-path">${buildRoutePath(result.route)}</div>
+      <div style="margin-top:15px;padding:15px;background:var(--bg-tertiary);border-radius:8px">
+        <strong>Total ${result.metric === 'km' ? 'Distance' : 'Time'}:</strong> ${result.totalDistance} ${result.metric}
+      </div>`;
+  } else {
+    rc.innerHTML = `<p style="color:var(--emergency-red)">${result.message || 'Error computing route'}</p>`;
+  }
+}
+
+async function findMultiRoute(event) {
+  event.preventDefault();
+  const centerId = document.getElementById('multiRouteCenterId').value;
+  const useTime  = document.getElementById('multiRouteUseTime').checked;
+  const areaIds  = Array.from(document.querySelectorAll('#multiAreaSelect input:checked')).map(cb => parseInt(cb.value));
+
+  if (!areaIds.length) { alert('Please select at least one area'); return; }
+
+  const rc = document.getElementById('multiRouteResult');
+  rc.innerHTML = '<div class="loading"></div> Computing multi-stop route...';
+
+  const result = await apiRequest('/routes/multi-stop', 'POST', { centerId: parseInt(centerId), areaIds, useTime });
+
+  if (result.success) {
+    rc.innerHTML = `
+      <h3 style="margin-bottom:15px;color:var(--safe-green)">✓ Multi-Stop Route Planned</h3>
+      <div class="route-path" style="flex-wrap:wrap">${buildRoutePath(result.route)}</div>
+      <div style="margin-top:15px;padding:15px;background:var(--bg-tertiary);border-radius:8px">
+        <strong>Stops:</strong> ${result.stopsCount}<br>
+        <strong>Total ${result.metric === 'km' ? 'Distance' : 'Time'}:</strong> ${result.totalDistance} ${result.metric}
+      </div>`;
+  } else {
+    rc.innerHTML = `<p style="color:var(--emergency-red)">${result.message || 'Error computing route'}</p>`;
+  }
+}
+
+function buildRoutePath(route) {
+  return route.map((node, i) => {
+    const cls   = node.type === 'center' ? 'center' : 'area';
+    const arrow = i < route.length - 1 ? '<span class="route-arrow">→</span>' : '';
+    return `<div class="route-node ${cls}">${node.name}</div>${arrow}`;
   }).join('');
 }
 
-// ─── Data Loading ─────────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════
+//  SIMULATION
+// ══════════════════════════════════════════════════
 
-async function loadAll() {
-  try {
-    [_centers, _areas, _roads] = await Promise.all([
-      apiFetch('/centers'),
-      apiFetch('/areas'),
-      apiFetch('/roads')
-    ]);
-    populateDropdowns();
-    updateStatus(true);
-  } catch {
-    updateStatus(false);
-  }
+function populateSimulationSelects() {
+  const sel = document.getElementById('simRoadId');
+  sel.innerHTML = '<option value="">-- No road change --</option>' +
+    roads.map(r => `<option value="${r.id}">Road ${r.id}: ${r.from_location_id} ↔ ${r.to_location_id}</option>`).join('');
 }
 
-function updateStatus(online) {
-  const el = document.getElementById('statusIndicator');
-  if (!el) return;
-  el.textContent = online ? '● Online' : '✕ Offline';
-  el.className = `status-badge ${online ? 'status-online' : 'status-offline'}`;
-}
-
-function populateDropdowns() {
-  populateCenterSelects();
-  populateAreaSelects();
-  populateRoadSelects();
-  renderMultiAreaChecks();
-  renderSimChecks();
-}
-
-function populateCenterSelects() {
-  const ids = ['routeCenter', 'multiCenter', 'simCenter', 'deleteCenterSelect'];
-  for (const id of ids) {
-    const sel = document.getElementById(id);
-    if (!sel) continue;
-    const val = sel.value;
-    sel.innerHTML = '<option value="">-- Select center --</option>' +
-      _centers.map((c) => `<option value="${c.id}">${c.name} (ID ${c.id})</option>`).join('');
-    if (val) sel.value = val;
-  }
-}
-
-function populateAreaSelects() {
-  const ids = ['routeArea', 'deleteAreaSelect'];
-  for (const id of ids) {
-    const sel = document.getElementById(id);
-    if (!sel) continue;
-    const val = sel.value;
-    sel.innerHTML = '<option value="">-- Select area --</option>' +
-      _areas.map((a) => `<option value="${a.id}">${a.name} (ID ${a.id})</option>`).join('');
-    if (val) sel.value = val;
-  }
-}
-
-function populateRoadSelects() {
-  const sel = document.getElementById('deleteRoadSelect');
-  if (!sel) return;
-  const val = sel.value;
-  sel.innerHTML = '<option value="">-- Select road --</option>' +
-    _roads.map((r) => {
-      const blocked = r.is_blocked ? ' [BLOCKED]' : '';
-      return `<option value="${r.id}">Road ${r.id}: ${r.from_location_id}→${r.to_location_id} (${r.distance_km}km)${blocked}</option>`;
-    }).join('');
-  if (val) sel.value = val;
-}
-
-function renderMultiAreaChecks() {
-  const container = document.getElementById('multiAreaChecks');
-  if (!container) return;
-  if (_areas.length === 0) { container.innerHTML = '<p class="placeholder">No areas loaded.</p>'; return; }
-  container.innerHTML = _areas.map((a) =>
-    `<label class="check-item">
-      <input type="checkbox" class="multiAreaCheck" value="${a.id}" />
-      ${a.name}
-    </label>`
-  ).join('');
-}
-
-function renderSimChecks() {
-  const roadContainer = document.getElementById('simRoadChecks');
-  if (roadContainer) {
-    if (_roads.length === 0) { roadContainer.innerHTML = '<p class="placeholder">No roads loaded.</p>'; }
-    else {
-      roadContainer.innerHTML = _roads.map((r) => {
-        const blocked = r.is_blocked ? ' [currently blocked]' : '';
-        return `<label class="check-item">
-          <input type="checkbox" class="simRoadCheck" value="${r.id}" ${r.is_blocked ? 'checked' : ''} />
-          Road ${r.id} (${r.from_location_id}→${r.to_location_id})${blocked}
-        </label>`;
-      }).join('');
-    }
-  }
-
-  const areaContainer = document.getElementById('simAreaChecks');
-  if (areaContainer) {
-    if (_areas.length === 0) { areaContainer.innerHTML = '<p class="placeholder">No areas loaded.</p>'; }
-    else {
-      areaContainer.innerHTML = _areas.map((a) =>
-        `<label class="check-item">
-          <input type="checkbox" class="simAreaCheck" value="${a.id}" />
-          ${a.name}
-        </label>`
-      ).join('');
-    }
-  }
-}
-
-// ─── Dashboard ────────────────────────────────────────────────────────────────
-
-async function loadDashboard() {
-  await loadAll();
-  renderCentersTable();
-  renderAreasTable();
-  renderRoadsTable();
-}
-
-function renderCentersTable() {
-  const el = document.getElementById('centersTable');
-  if (!el) return;
-  if (_centers.length === 0) { el.innerHTML = '<p class="placeholder">No relief centers.</p>'; return; }
-  el.innerHTML = `<table>
-    <thead><tr>
-      <th>ID</th><th>Name</th><th>Food Kits</th><th>Water Units</th><th>Medical Kits</th>
-    </tr></thead>
-    <tbody>
-      ${_centers.map((c) => `<tr>
-        <td>${c.id}</td>
-        <td><strong>${c.name}</strong></td>
-        <td>${c.total_food_kits}</td>
-        <td>${c.total_water_units}</td>
-        <td>${c.total_medical_kits}</td>
-      </tr>`).join('')}
-    </tbody>
-  </table>`;
-}
-
-function renderAreasTable() {
-  const el = document.getElementById('areasTable');
-  if (!el) return;
-  if (_areas.length === 0) { el.innerHTML = '<p class="placeholder">No affected areas.</p>'; return; }
-  el.innerHTML = `<table>
-    <thead><tr>
-      <th>ID</th><th>Name</th><th>People</th><th>Severity</th><th>Access</th><th>Priority</th>
-    </tr></thead>
-    <tbody>
-      ${_areas.map((a) => `<tr>
-        <td>${a.id}</td>
-        <td><strong>${a.name}</strong></td>
-        <td>${a.people_count}</td>
-        <td>${a.severity}/5</td>
-        <td>${a.access_difficulty === 1 ? '⚠️ Hard' : '✅ Easy'}</td>
-        <td>${priorityBadge(a.priority_score)} ${a.priority_score.toFixed(3)}</td>
-      </tr>`).join('')}
-    </tbody>
-  </table>`;
-}
-
-function renderRoadsTable() {
-  const el = document.getElementById('roadsTable');
-  if (!el) return;
-  if (_roads.length === 0) { el.innerHTML = '<p class="placeholder">No roads.</p>'; return; }
-  el.innerHTML = `<table>
-    <thead><tr>
-      <th>ID</th><th>From</th><th>To</th><th>Distance</th><th>Time (min)</th><th>Status</th>
-    </tr></thead>
-    <tbody>
-      ${_roads.map((r) => `<tr>
-        <td>${r.id}</td>
-        <td>${nodeLabel(r.from_location_id, _centers, _areas)}<br><small style="color:var(--text-muted)">#${r.from_location_id}</small></td>
-        <td>${nodeLabel(r.to_location_id, _centers, _areas)}<br><small style="color:var(--text-muted)">#${r.to_location_id}</small></td>
-        <td>${r.distance_km} km</td>
-        <td>${r.travel_time_minutes}</td>
-        <td>${r.is_blocked ? '<span class="badge badge-blocked">Blocked</span>' : '<span class="badge badge-open">Open</span>'}</td>
-      </tr>`).join('')}
-    </tbody>
-  </table>`;
-}
-
-// ─── Priority Scoring ─────────────────────────────────────────────────────────
-
-async function computePriorities() {
-  const el = document.getElementById('priorityResults');
-  el.innerHTML = '<p class="placeholder">Computing…</p>';
-  try {
-    const data = await apiFetch('/compute-priorities', { method: 'POST' });
-    const list = data.priorities || [];
-    if (list.length === 0) { el.innerHTML = '<p class="placeholder">No areas to score.</p>'; return; }
-
-    // Refresh cache
-    _areas = await apiFetch('/areas');
-    populateAreaSelects();
-    renderAreasTable();
-
-    el.innerHTML = `<table>
-      <thead><tr>
-        <th>Rank</th><th>Area</th><th>People</th><th>Severity</th><th>Access</th><th>Score</th><th>Priority</th>
-      </tr></thead>
-      <tbody>
-        ${list.map((a, i) => `<tr>
-          <td><strong>#${i + 1}</strong></td>
-          <td><strong>${a.name}</strong></td>
-          <td>${a.people_count}</td>
-          <td>${a.severity}/5</td>
-          <td>${a.access_difficulty === 1 ? '⚠️ Hard' : '✅ Easy'}</td>
-          <td><strong style="color:var(--accent-cyan)">${a.priority_score.toFixed(4)}</strong></td>
-          <td>${priorityBadge(a.priority_score)}</td>
-        </tr>`).join('')}
-      </tbody>
-    </table>`;
-  } catch (err) {
-    el.innerHTML = `<p style="color:var(--accent-red)">Error: ${err.message}</p>`;
-  }
-}
-
-// ─── Resource Allocation ──────────────────────────────────────────────────────
-
-async function computeAllocation() {
-  const summaryEl = document.getElementById('allocationSummary');
-  const resultsEl = document.getElementById('allocationResults');
-  resultsEl.innerHTML = '<p class="placeholder">Computing…</p>';
-  summaryEl.classList.add('hidden');
-
-  try {
-    const data = await apiFetch('/allocate-resources', { method: 'POST' });
-
-    // Summary
-    const r = data.allocation_ratios;
-    summaryEl.innerHTML = `
-      <div><div class="stat-label">Food Ratio</div><div class="stat-value">${r.food_kits}%</div></div>
-      <div><div class="stat-label">Water Ratio</div><div class="stat-value">${r.water_units}%</div></div>
-      <div><div class="stat-label">Medical Ratio</div><div class="stat-value">${r.medical_kits}%</div></div>
-      <div><div class="stat-label">Total Food Avail.</div><div class="stat-value">${data.available_resources.food_kits}</div></div>
-      <div><div class="stat-label">Total Water Avail.</div><div class="stat-value">${data.available_resources.water_units}</div></div>
-      <div><div class="stat-label">Total Medical Avail.</div><div class="stat-value">${data.available_resources.medical_kits}</div></div>
-    `;
-    summaryEl.classList.remove('hidden');
-
-    // Table
-    const allocs = data.allocations || [];
-    if (allocs.length === 0) { resultsEl.innerHTML = '<p class="placeholder">No allocations.</p>'; return; }
-
-    resultsEl.innerHTML = `<table>
-      <thead><tr>
-        <th>Area</th><th>Priority</th>
-        <th>Food (req/alloc)</th><th>Fulfillment</th>
-        <th>Water (req/alloc)</th><th>Fulfillment</th>
-        <th>Medical (req/alloc)</th><th>Fulfillment</th>
-      </tr></thead>
-      <tbody>
-        ${allocs.map((a) => `<tr>
-          <td><strong>${a.area_name}</strong></td>
-          <td>${priorityBadge(a.priority_score)}</td>
-          <td>${a.required.food_kits} / ${a.allocated.food_kits}</td>
-          <td>${fillBar(a.fulfillment_pct.food_kits)}</td>
-          <td>${a.required.water_units} / ${a.allocated.water_units}</td>
-          <td>${fillBar(a.fulfillment_pct.water_units)}</td>
-          <td>${a.required.medical_kits} / ${a.allocated.medical_kits}</td>
-          <td>${fillBar(a.fulfillment_pct.medical_kits)}</td>
-        </tr>`).join('')}
-      </tbody>
-    </table>`;
-  } catch (err) {
-    resultsEl.innerHTML = `<p style="color:var(--accent-red)">Error: ${err.message}</p>`;
-  }
-}
-
-// ─── Single Route ─────────────────────────────────────────────────────────────
-
-async function findRoute() {
-  const centerId = document.getElementById('routeCenter').value;
-  const areaId   = document.getElementById('routeArea').value;
-  const useTime  = document.getElementById('routeUseTime').checked;
-  const el       = document.getElementById('routeResult');
-
-  if (!centerId || !areaId) {
-    el.innerHTML = '<p style="color:var(--accent-orange)">Please select both a center and an area.</p>';
-    el.className = 'result-box warning';
-    el.classList.remove('hidden');
-    return;
-  }
-
-  el.innerHTML = '<p class="placeholder">Finding route…</p>';
-  el.className = 'result-box';
-  el.classList.remove('hidden');
-
-  try {
-    const data = await apiFetch(`/routes?centerId=${centerId}&areaId=${areaId}&useTime=${useTime}`);
-    if (!data.found) {
-      el.className = 'result-box warning';
-      el.innerHTML = `<p style="color:var(--accent-orange)">⚠️ No route found — road may be blocked or disconnected.</p>`;
-      return;
-    }
-    const center = _centers.find((c) => c.id === Number(centerId));
-    const area   = _areas.find((a) => a.id === Number(areaId));
-    el.className = 'result-box success';
-    el.innerHTML = `
-      <p><strong>Route:</strong> ${center?.name} → ${area?.name}</p>
-      <p style="margin:.5rem 0"><strong>Total ${data.metric}:</strong>
-        <span style="font-size:1.2rem;color:var(--accent-green);font-weight:700"> ${data.totalWeight} ${data.metric}</span>
-      </p>
-      <div class="route-path">${renderRouteNodes(data.path, _centers, _areas)}</div>
-    `;
-  } catch (err) {
-    el.className = 'result-box error';
-    el.innerHTML = `<p style="color:var(--accent-red)">Error: ${err.message}</p>`;
-  }
-}
-
-// ─── Multi-Stop Route ─────────────────────────────────────────────────────────
-
-async function planMultiStop() {
-  const centerId = document.getElementById('multiCenter').value;
-  const useTime  = document.getElementById('multiUseTime').checked;
-  const el       = document.getElementById('multiResult');
-
-  const selectedAreaIds = [...document.querySelectorAll('.multiAreaCheck:checked')]
-    .map((cb) => Number(cb.value));
-
-  if (!centerId) {
-    el.innerHTML = '<p style="color:var(--accent-orange)">Please select a center.</p>';
-    el.className = 'result-box warning';
-    el.classList.remove('hidden');
-    return;
-  }
-  if (selectedAreaIds.length === 0) {
-    el.innerHTML = '<p style="color:var(--accent-orange)">Please select at least one area.</p>';
-    el.className = 'result-box warning';
-    el.classList.remove('hidden');
-    return;
-  }
-
-  el.innerHTML = '<p class="placeholder">Planning route…</p>';
-  el.className = 'result-box';
-  el.classList.remove('hidden');
-
-  try {
-    const data = await apiFetch('/routes/multi-stop', {
-      method: 'POST',
-      body: JSON.stringify({ centerId: Number(centerId), areaIds: selectedAreaIds, useTime })
-    });
-
-    const center = _centers.find((c) => c.id === Number(centerId));
-    el.className = 'result-box success';
-
-    const segmentRows = (data.segments || []).map((seg) => {
-      const from = nodeLabel(seg.from, _centers, _areas);
-      const to   = nodeLabel(seg.to, _centers, _areas);
-      if (!seg.reachable) {
-        return `<tr><td>${from}</td><td>${to}</td><td colspan="2" style="color:var(--accent-red)">Unreachable (blocked)</td></tr>`;
-      }
-      return `<tr>
-        <td>${from}</td><td>${to}</td>
-        <td>${seg.weight} ${data.metric}</td>
-        <td><div class="route-path" style="padding:.4rem">${renderRouteNodes(seg.path, _centers, _areas)}</div></td>
-      </tr>`;
-    }).join('');
-
-    el.innerHTML = `
-      <p><strong>Starting from:</strong> ${center?.name}</p>
-      <p style="margin:.5rem 0"><strong>Total ${data.metric}:</strong>
-        <span style="font-size:1.2rem;color:var(--accent-green);font-weight:700"> ${data.totalWeight} ${data.metric}</span>
-      </p>
-      <table style="margin-top:.75rem">
-        <thead><tr><th>From</th><th>To</th><th>Distance/Time</th><th>Path</th></tr></thead>
-        <tbody>${segmentRows}</tbody>
-      </table>
-    `;
-  } catch (err) {
-    el.className = 'result-box error';
-    el.innerHTML = `<p style="color:var(--accent-red)">Error: ${err.message}</p>`;
-  }
-}
-
-// ─── What-If Simulation ───────────────────────────────────────────────────────
-
-async function runSimulation() {
-  const centerId = document.getElementById('simCenter').value;
-  const useTime  = document.getElementById('simUseTime').checked;
-  const el       = document.getElementById('simResult');
-
-  const blockedRoadIds = [...document.querySelectorAll('.simRoadCheck:checked')]
-    .map((cb) => Number(cb.value));
-  const areaIds = [...document.querySelectorAll('.simAreaCheck:checked')]
-    .map((cb) => Number(cb.value));
-
-  el.innerHTML = '<p class="placeholder">Running simulation…</p>';
-  el.className = 'result-box';
-  el.classList.remove('hidden');
-
-  try {
-    const data = await apiFetch('/simulate', {
-      method: 'POST',
-      body: JSON.stringify({
-        blockedRoadIds,
-        centerId: centerId ? Number(centerId) : null,
-        areaIds,
-        useTime
-      })
-    });
-
-    const priorityRows = (data.priorities || []).map((a, i) =>
-      `<tr>
-        <td>#${i + 1}</td>
-        <td><strong>${a.name}</strong></td>
-        <td>${a.severity}/5</td>
-        <td>${a.people_count}</td>
-        <td>${a.access_difficulty === 1 ? '⚠️ Hard' : '✅ Easy'}</td>
-        <td><strong style="color:var(--accent-cyan)">${a.priority_score.toFixed(4)}</strong></td>
-        <td>${priorityBadge(a.priority_score)}</td>
-      </tr>`
-    ).join('');
-
-    const routeRows = (data.routes || []).map((r) => {
-      const area = _areas.find((a) => a.id === r.areaId);
-      if (!r.found) {
-        return `<tr><td>${area?.name || r.areaId}</td><td colspan="2" style="color:var(--accent-red)">🚫 No route (blocked)</td></tr>`;
-      }
-      return `<tr>
-        <td>${area?.name || r.areaId}</td>
-        <td>${r.totalWeight} ${data.metric}</td>
-        <td><div class="route-path" style="padding:.4rem">${renderRouteNodes(r.path, _centers, _areas)}</div></td>
-      </tr>`;
-    }).join('');
-
-    el.className = 'result-box';
-    el.innerHTML = `
-      <h4 style="color:var(--accent-orange);margin-bottom:.75rem">🧪 Simulation Results — ${blockedRoadIds.length} road(s) blocked</h4>
-
-      <h5 style="margin-bottom:.4rem">Priority Ranking under Simulation</h5>
-      <table>
-        <thead><tr><th>Rank</th><th>Area</th><th>Severity</th><th>People</th><th>Access</th><th>Score</th><th>Priority</th></tr></thead>
-        <tbody>${priorityRows}</tbody>
-      </table>
-
-      ${routeRows ? `
-      <h5 style="margin:.75rem 0 .4rem">Routes from Selected Center</h5>
-      <table>
-        <thead><tr><th>Area</th><th>Cost (${data.metric})</th><th>Path</th></tr></thead>
-        <tbody>${routeRows}</tbody>
-      </table>` : ''}
-    `;
-  } catch (err) {
-    el.className = 'result-box error';
-    el.innerHTML = `<p style="color:var(--accent-red)">Error: ${err.message}</p>`;
-  }
-}
-
-// ─── CRUD ─────────────────────────────────────────────────────────────────────
-
-async function addCenter(event) {
+async function runSimulation(event) {
   event.preventDefault();
-  const form = event.target;
-  const body = {
-    name: form.name.value,
-    latitude: Number(form.latitude.value),
-    longitude: Number(form.longitude.value),
-    total_food_kits: Number(form.total_food_kits.value),
-    total_water_units: Number(form.total_water_units.value),
-    total_medical_kits: Number(form.total_medical_kits.value)
-  };
-  try {
-    await apiFetch('/centers', { method: 'POST', body: JSON.stringify(body) });
-    showMsg('addCenterMsg', 'Center added successfully!', 'success');
-    form.reset();
-    _centers = await apiFetch('/centers');
-    populateCenterSelects();
-    renderCentersTable();
-  } catch (err) {
-    showMsg('addCenterMsg', `Error: ${err.message}`, 'error');
+  const roadId  = document.getElementById('simRoadId').value;
+  const blocked = document.getElementById('simBlocked').value === 'true';
+
+  if (!roadId) { alert('Please select a road to modify'); return; }
+
+  const rc = document.getElementById('simulationResult');
+  rc.innerHTML = '<div class="loading"></div> Running simulation...';
+
+  const result = await apiRequest('/simulate', 'POST', { roadId: parseInt(roadId), blocked });
+
+  if (result.success) {
+    const top5 = result.results.priorities.slice(0, 5);
+    rc.innerHTML = `
+      <h3 style="margin-bottom:15px;color:var(--safe-green)">✓ Simulation Complete</h3>
+      <div style="padding:15px;background:var(--bg-tertiary);border-radius:8px;margin-bottom:20px">
+        <strong>Scenario:</strong> Road ${roadId} is ${blocked ? 'BLOCKED' : 'UNBLOCKED'}
+      </div>
+      <h4 style="margin-bottom:10px">Impact on Priorities:</h4>
+      <table class="table">
+        <thead><tr><th>Rank</th><th>Area</th><th>Priority Score</th><th>People</th><th>Severity</th></tr></thead>
+        <tbody>
+          ${top5.map((area, i) => `
+            <tr>
+              <td><strong>${i + 1}</strong></td>
+              <td>${area.name}</td>
+              <td><span class="priority-badge priority-${getPriorityLevel(area.priority_score)}">${area.priority_score}</span></td>
+              <td>${area.people_count}</td>
+              <td>${area.severity}/5</td>
+            </tr>`).join('')}
+        </tbody>
+      </table>`;
+
+    // Refresh map to show any road-status changes
+    await loadRoads();
+  } else {
+    rc.innerHTML = `<p style="color:var(--emergency-red)">Error: ${result.error || result.message}</p>`;
   }
 }
 
-async function addArea(event) {
-  event.preventDefault();
-  const form = event.target;
-  const body = {
-    name: form.name.value,
-    latitude: Number(form.latitude.value),
-    longitude: Number(form.longitude.value),
-    people_count: Number(form.people_count.value),
-    severity: Number(form.severity.value),
-    access_difficulty: Number(form.access_difficulty.value),
-    required_food_kits: Number(form.required_food_kits.value),
-    required_water_units: Number(form.required_water_units.value),
-    required_medical_kits: Number(form.required_medical_kits.value)
-  };
-  try {
-    await apiFetch('/areas', { method: 'POST', body: JSON.stringify(body) });
-    showMsg('addAreaMsg', 'Area added successfully!', 'success');
-    form.reset();
-    _areas = await apiFetch('/areas');
-    populateAreaSelects();
-    renderAreasTable();
-    renderMultiAreaChecks();
-    renderSimChecks();
-  } catch (err) {
-    showMsg('addAreaMsg', `Error: ${err.message}`, 'error');
-  }
-}
+// ══════════════════════════════════════════════════
+//  FORM HANDLERS
+// ══════════════════════════════════════════════════
 
-async function addRoad(event) {
-  event.preventDefault();
-  const form = event.target;
-  const body = {
-    from_location_id: Number(form.from_location_id.value),
-    to_location_id: Number(form.to_location_id.value),
-    distance_km: Number(form.distance_km.value),
-    travel_time_minutes: Number(form.travel_time_minutes.value),
-    is_blocked: form.is_blocked.checked
-  };
-  try {
-    await apiFetch('/roads', { method: 'POST', body: JSON.stringify(body) });
-    showMsg('addRoadMsg', 'Road added successfully!', 'success');
-    form.reset();
-    _roads = await apiFetch('/roads');
-    populateRoadSelects();
-    renderRoadsTable();
-    renderSimChecks();
-  } catch (err) {
-    showMsg('addRoadMsg', `Error: ${err.message}`, 'error');
-  }
-}
+function setupFormHandlers() {
+  document.getElementById('routeForm').addEventListener('submit', findRoute);
+  document.getElementById('multiRouteForm').addEventListener('submit', findMultiRoute);
+  document.getElementById('simulationForm').addEventListener('submit', runSimulation);
 
-async function toggleRoadBlock() {
-  const sel = document.getElementById('deleteRoadSelect');
-  const roadId = sel.value;
-  if (!roadId) { showMsg('deleteRoadMsg', 'Please select a road.', 'error'); return; }
-  const road = _roads.find((r) => r.id === Number(roadId));
-  if (!road) return;
-  try {
-    await apiFetch(`/roads/${roadId}`, {
-      method: 'PUT',
-      body: JSON.stringify({ is_blocked: !road.is_blocked })
-    });
-    showMsg('deleteRoadMsg', `Road ${roadId} is now ${!road.is_blocked ? 'blocked' : 'unblocked'}.`, 'success');
-    _roads = await apiFetch('/roads');
-    populateRoadSelects();
-    renderRoadsTable();
-    renderSimChecks();
-  } catch (err) {
-    showMsg('deleteRoadMsg', `Error: ${err.message}`, 'error');
-  }
-}
+  // Add Center
+  document.getElementById('addCenterForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const data = Object.fromEntries(new FormData(e.target));
+    data.latitude         = parseFloat(data.latitude);
+    data.longitude        = parseFloat(data.longitude);
+    data.total_food_kits  = parseInt(data.total_food_kits);
+    data.total_water_units = parseInt(data.total_water_units);
+    data.total_medical_kits = parseInt(data.total_medical_kits);
 
-async function deleteRoad() {
-  const sel = document.getElementById('deleteRoadSelect');
-  const roadId = sel.value;
-  if (!roadId) { showMsg('deleteRoadMsg', 'Please select a road.', 'error'); return; }
-  if (!confirm(`Delete road ${roadId}?`)) return;
-  try {
-    await apiFetch(`/roads/${roadId}`, { method: 'DELETE' });
-    showMsg('deleteRoadMsg', `Road ${roadId} deleted.`, 'success');
-    _roads = await apiFetch('/roads');
-    populateRoadSelects();
-    renderRoadsTable();
-    renderSimChecks();
-  } catch (err) {
-    showMsg('deleteRoadMsg', `Error: ${err.message}`, 'error');
-  }
-}
-
-async function deleteCenter() {
-  const sel = document.getElementById('deleteCenterSelect');
-  const centerId = sel.value;
-  if (!centerId) { showMsg('deleteCenterMsg', 'Please select a center.', 'error'); return; }
-  if (!confirm(`Delete center ${centerId}?`)) return;
-  try {
-    await apiFetch(`/centers/${centerId}`, { method: 'DELETE' });
-    showMsg('deleteCenterMsg', `Center ${centerId} deleted.`, 'success');
-    _centers = await apiFetch('/centers');
-    populateCenterSelects();
-    renderCentersTable();
-  } catch (err) {
-    showMsg('deleteCenterMsg', `Error: ${err.message}`, 'error');
-  }
-}
-
-async function deleteArea() {
-  const sel = document.getElementById('deleteAreaSelect');
-  const areaId = sel.value;
-  if (!areaId) { showMsg('deleteAreaMsg', 'Please select an area.', 'error'); return; }
-  if (!confirm(`Delete area ${areaId}?`)) return;
-  try {
-    await apiFetch(`/areas/${areaId}`, { method: 'DELETE' });
-    showMsg('deleteAreaMsg', `Area ${areaId} deleted.`, 'success');
-    _areas = await apiFetch('/areas');
-    populateAreaSelects();
-    renderAreasTable();
-    renderMultiAreaChecks();
-    renderSimChecks();
-  } catch (err) {
-    showMsg('deleteAreaMsg', `Error: ${err.message}`, 'error');
-  }
-}
-
-// ─── Navigation ───────────────────────────────────────────────────────────────
-
-document.querySelectorAll('.nav-btn').forEach((btn) => {
-  btn.addEventListener('click', () => {
-    document.querySelectorAll('.nav-btn').forEach((b) => b.classList.remove('active'));
-    document.querySelectorAll('.section').forEach((s) => s.classList.remove('active'));
-    btn.classList.add('active');
-    document.getElementById(btn.dataset.section).classList.add('active');
+    const result = await apiRequest('/centers', 'POST', data);
+    if (result.success) {
+      alert('Relief center added successfully!');
+      e.target.reset();
+      await loadCenters();
+    } else {
+      alert('Error: ' + (result.error || result.message));
+    }
   });
-});
 
-// ─── Init ─────────────────────────────────────────────────────────────────────
+  // Add Area
+  document.getElementById('addAreaForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const data = Object.fromEntries(new FormData(e.target));
+    data.latitude          = parseFloat(data.latitude);
+    data.longitude         = parseFloat(data.longitude);
+    data.people_count      = parseInt(data.people_count);
+    data.severity          = parseInt(data.severity);
+    data.access_difficulty = parseInt(data.access_difficulty);
+    data.required_food_kits   = parseInt(data.required_food_kits);
+    data.required_water_units = parseInt(data.required_water_units);
+    data.required_medical_kits = parseInt(data.required_medical_kits);
 
-loadDashboard();
+    const result = await apiRequest('/areas', 'POST', data);
+    if (result.success) {
+      alert('Affected area added successfully!');
+      e.target.reset();
+      await loadAreas();
+    } else {
+      alert('Error: ' + (result.error || result.message));
+    }
+  });
+
+  // Add Road
+  document.getElementById('addRoadForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const data = Object.fromEntries(new FormData(e.target));
+    data.from_location_id   = parseInt(data.from_location_id);
+    data.to_location_id     = parseInt(data.to_location_id);
+    data.distance_km        = parseFloat(data.distance_km);
+    data.travel_time_minutes = parseInt(data.travel_time_minutes);
+    data.is_blocked         = data.is_blocked === 'on';
+
+    const result = await apiRequest('/roads', 'POST', data);
+    if (result.success) {
+      alert('Road connection added successfully!');
+      e.target.reset();
+      await loadRoads();
+    } else {
+      alert('Error: ' + (result.error || result.message));
+    }
+  });
+}
